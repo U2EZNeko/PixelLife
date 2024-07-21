@@ -201,6 +201,7 @@ class Cell:
         return nearest_object
 
     def find_nearest_mate(self, cells):
+        #print("Cell looking for mate.")
         nearest_mate = None
         min_distance = float('inf')
         for cell in cells:
@@ -209,9 +210,11 @@ class Cell:
                 if distance < min_distance:
                     min_distance = distance
                     nearest_mate = cell
+                    print("Cell found a mate.")
         return nearest_mate
 
     def start_mating(self, other):
+        print("Cell is Mating.")
         self.is_mating = True
         self.mating_timer = MATING_DURATION
         other.is_mating = True
@@ -311,6 +314,7 @@ def respawn_food(food_cells):
         new_y = (new_y // CELL_SIZE) * CELL_SIZE
         new_food = Food(new_x, new_y)
         food_cells.append(new_food)
+        #print("Spawned a food cell.")
 
 def main():
     pygame.init()

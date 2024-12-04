@@ -3,7 +3,10 @@
 A comprehensive simulation of a "cell ecosystem" using the pygame library. 
 It incorporates various features such as cell movement, reproduction, hunger, stamina, obstacle interactions, and visual debugging.
 
-The simulation is highly extensible.
+The simulation is highly extensible and should be fairly easy to understand.
+
+
+This project is inspired by The Bibites.
 
 ## To-Do:
 - More genetic traits

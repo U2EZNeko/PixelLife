@@ -14,12 +14,12 @@ TICK_RATE = 30
 # Game Variables
 NUM_INITIAL_CELLS = 50
 NUM_INITIAL_FOOD = 200
-FOOD_RESPAWN_RATE = 0.3
-STAMINA_PER_STEP = 0.25
-FOOD_GAINED_FROM_FOOD_CELLS = 45
+FOOD_RESPAWN_RATE = 0.5  # Increased from 0.3
+STAMINA_PER_STEP = 0.15  # Reduced from 0.25
+FOOD_GAINED_FROM_FOOD_CELLS = 60  # Increased from 45
 STAMINA_GAINED_FROM_FOOD_CELLS = 45
-IDLE_STAMINA_GAIN = 0.5
-IDLE_HUNGER_CONSUMPTION = 0.1
+IDLE_STAMINA_GAIN = 0.8  # Increased from 0.5
+IDLE_HUNGER_CONSUMPTION = 0.1  # Increased from 0.05
 
 # Obstacles
 NUM_OBSTACLES = 10
@@ -31,13 +31,16 @@ live_cells_history = []
 food_cells_history = []
 highest_generation_history = []
 ticks = []
+mating_attempts = 0
+mating_successes = 0
+food_despawned_count = 0
 
 # Mating Data
-MATING_STAMINA_COST = 90
-MATING_HUNGER_COST = 30
-MATING_COOLDOWN = 400
+MATING_STAMINA_COST = 90  # Reduced from 120
+MATING_HUNGER_COST = 30   # Reduced from 50
+MATING_COOLDOWN = 400     # Reduced from 600
 MATING_DURATION = 240
-NEWBORN_MATING_COOLDOWN = 160
+NEWBORN_MATING_COOLDOWN = 100  # Reduced from 200
 
 # Cell stats
 MAX_HP = 100
@@ -47,11 +50,12 @@ CELL_INITIAL_HP = 100
 CELL_INITIAL_STAMINA = 150
 CELL_INITIAL_HUNGER = 120
 MAX_AGE = 1400
-INITIAL_MORTALITY_CHANCE = 0.0000
+INITIAL_MORTALITY_CHANCE = 0.00001  # Reduced from 0.0001
 
 # Food limits
 MAX_FOOD_CELLS = 300
 MIN_FOOD_CELLS = 50
+FOOD_DESPAWN_TIME = 2000  # Food will despawn after 2000 ticks if not eaten
 
 # Colors
 WHITE = (255, 255, 255)
@@ -140,8 +144,15 @@ class Cell:
             old_x, old_y = self.x, self.y
             new_x = self.x + direction_x * step_size
             new_y = self.y + direction_y * step_size
-            new_x = max(min(new_x, SCREEN_WIDTH - CELL_SIZE), 0)
-            new_y = max(min(new_y, SCREEN_HEIGHT - CELL_SIZE), 0)
+            
+            # Improved boundary clamping to ensure grid alignment
+            new_x = max(0, min(new_x, SCREEN_WIDTH - CELL_SIZE))
+            new_y = max(0, min(new_y, SCREEN_HEIGHT - CELL_SIZE))
+            
+            # Ensure grid alignment
+            new_x = (new_x // CELL_SIZE) * CELL_SIZE
+            new_y = (new_y // CELL_SIZE) * CELL_SIZE
+            
             if not self.is_collision(new_x, new_y, spatial_grid, obstacles):
                 self.x, self.y = new_x, new_y
                 spatial_grid.move(self, old_x, old_y)
@@ -153,23 +164,44 @@ class Cell:
         if self.is_mating:
             return
         if self.hunger <= 0:
-            self.hp -= 0.5
+            self.hp -= 0.25  # Reduced from 0.5 - less HP loss when starving
         if self.hunger >= 90:
             self.hp += 1
         if self.stamina >= 0:
-            if self.hunger <= 90:
+            # Priority 1: If very hungry, seek food
+            if self.hunger <= 60:
                 nearest_food = self.find_nearest(food_cells)
                 if nearest_food:
                     self.move_towards(nearest_food.x, nearest_food.y, spatial_grid, obstacles)
-            elif self.hunger >= 90 and self.hp >= 90 and self.mating_cooldown == 0:
+                else:
+                    # No food available, move randomly
+                    self.move_randomly(spatial_grid, obstacles)
+            # Priority 2: If well-fed and healthy, seek mates
+            elif (self.hunger >= 70 and self.hunger <= 95 and 
+                  self.hp >= 70 and self.hp <= 98 and 
+                  self.stamina >= 50 and 
+                  self.mating_cooldown == 0):
+                global mating_attempts
+                mating_attempts += 1
+                if mating_attempts % 10 == 0:  # Only print every 10th attempt to avoid spam
+                    print(f"Cell looking for mate (attempt #{mating_attempts}) - Hunger: {self.hunger:.1f}, HP: {self.hp:.1f}, Stamina: {self.stamina:.1f}")
                 nearest_mate = self.find_nearest_mate(spatial_grid.get_nearby(self.x, self.y))
                 if nearest_mate:
                     self.move_towards(nearest_mate.x, nearest_mate.y, spatial_grid, obstacles)
-            else:
-                if random.random() < 0.5:
-                    return
                 else:
+                    # No mates available, move randomly
                     self.move_randomly(spatial_grid, obstacles)
+            # Priority 3: If moderately fed but not well-fed enough to mate, seek more food
+            elif self.hunger < 70:
+                nearest_food = self.find_nearest(food_cells)
+                if nearest_food:
+                    self.move_towards(nearest_food.x, nearest_food.y, spatial_grid, obstacles)
+                else:
+                    # No food available, move randomly
+                    self.move_randomly(spatial_grid, obstacles)
+            # Priority 4: If overfed or otherwise not meeting mating conditions, move randomly
+            else:
+                self.move_randomly(spatial_grid, obstacles)
             self.stamina -= STAMINA_PER_STEP
         else:
             self.stamina = min(self.stamina + IDLE_STAMINA_GAIN, MAX_STAMINA)
@@ -177,6 +209,36 @@ class Cell:
     def move_randomly(self, spatial_grid, obstacles):
         if self.stamina > 0:
             self.stamina -= STAMINA_PER_STEP * calculate_energy_multiplier(self)  # Apply multiplier
+        
+        # Check if cell is near edge and add bias to move away
+        near_edge = (self.x < CELL_SIZE * 2 or self.x > SCREEN_WIDTH - CELL_SIZE * 3 or 
+                    self.y < CELL_SIZE * 2 or self.y > SCREEN_HEIGHT - CELL_SIZE * 3)
+        
+        if near_edge and random.random() < 0.7:  # 70% chance to move away from edge
+            # Calculate direction away from nearest edge
+            center_x, center_y = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+            away_x = center_x - self.x
+            away_y = center_y - self.y
+            # Normalize
+            distance = math.sqrt(away_x**2 + away_y**2)
+            if distance > 0:
+                away_x /= distance
+                away_y /= distance
+                # Move in the away direction
+                new_x = self.x + away_x * CELL_SIZE
+                new_y = self.y + away_y * CELL_SIZE
+                # Ensure grid alignment
+                new_x = (new_x // CELL_SIZE) * CELL_SIZE
+                new_y = (new_y // CELL_SIZE) * CELL_SIZE
+                if self.is_within_bounds(new_x, new_y) and not self.is_collision(new_x, new_y, spatial_grid, obstacles):
+                    old_x, old_y = self.x, self.y
+                    self.x, self.y = new_x, new_y
+                    self.direction_x = away_x
+                    self.direction_y = away_y
+                    spatial_grid.move(self, old_x, old_y)
+                    return
+        
+        # Regular random movement
         directions = ['up', 'down', 'left', 'right']
         random.shuffle(directions)
         for direction in directions:
@@ -200,6 +262,11 @@ class Cell:
                 self.direction_y = 0
             else:
                 continue  # Skip invalid movement
+            
+            # Ensure grid alignment
+            new_x = (new_x // CELL_SIZE) * CELL_SIZE
+            new_y = (new_y // CELL_SIZE) * CELL_SIZE
+            
             if self.is_within_bounds(new_x, new_y) and not self.is_collision(new_x, new_y, spatial_grid, obstacles):
                 old_x, old_y = self.x, self.y
                 self.x, self.y = new_x, new_y
@@ -225,7 +292,13 @@ class Cell:
         nearest_mate = None
         min_distance = float('inf')
         for cell in cells:
-            if cell != self and cell.hunger == CELL_INITIAL_HUNGER and cell.hp == CELL_INITIAL_HP and cell.mating_cooldown == 0 and not cell.is_mating:
+            # Relaxed mating conditions to match move method
+            if (cell != self and 
+                cell.hunger >= 70 and cell.hunger <= 95 and  # Relaxed from 80-95
+                cell.hp >= 70 and cell.hp <= 98 and          # Relaxed from 80-98
+                cell.stamina >= 50 and                       # Reduced from 60
+                cell.mating_cooldown == 0 and 
+                not cell.is_mating):
                 distance = math.hypot(self.x - cell.x, self.y - cell.y)
                 if distance < min_distance:
                     min_distance = distance
@@ -234,7 +307,9 @@ class Cell:
         return nearest_mate
 
     def start_mating(self, other):
-        print("Cell is Mating.")
+        global mating_successes
+        mating_successes += 1
+        print(f"SUCCESS! Cell is Mating (success #{mating_successes}). Hunger: {self.hunger:.1f}, HP: {self.hp:.1f}, Stamina: {self.stamina:.1f}")
         self.is_mating = True
         self.mating_timer = MATING_DURATION
         other.is_mating = True
@@ -283,16 +358,27 @@ class Cell:
 
     def update_status(self):
         self.age += 1
+        
+        # Safety check: ensure cell is within bounds
+        if self.x < 0 or self.x >= SCREEN_WIDTH or self.y < 0 or self.y >= SCREEN_HEIGHT:
+            print(f"WARNING: Cell at ({self.x}, {self.y}) is outside bounds! Clamping...")
+            self.x = max(0, min(self.x, SCREEN_WIDTH - CELL_SIZE))
+            self.y = max(0, min(self.y, SCREEN_HEIGHT - CELL_SIZE))
+            # Ensure grid alignment
+            self.x = (self.x // CELL_SIZE) * CELL_SIZE
+            self.y = (self.y // CELL_SIZE) * CELL_SIZE
+        
         if self.age > 0.7 * MAX_AGE:
-            self.mortality_chance += 0.0001
+            self.mortality_chance += 0.00001  # Reduced from 0.0001
         if random.random() < self.mortality_chance:
             self.hp = 0
             print("A cell has died")
-        self.hunger -= 1
+        self.hunger -= 0.8  # Increased from 0.5 - cells need to eat more frequently
         if self.hunger <= 0:
-            self.hp -= 1
+            self.hp -= 0.5  # Reduced from 1 - cells lose HP more slowly when starving
+        # Reduced HP gain to prevent immortality
         if self.hunger >= 100:
-            self.hp += 1
+            self.hp += 0.1  # Much smaller HP gain
         if self.hp > MAX_HP:
             self.hp = MAX_HP
         if self.mating_cooldown > 0:
@@ -320,12 +406,17 @@ class Cell:
         return abs(self.x - other.x) <= CELL_SIZE and abs(self.y - other.y) <= CELL_SIZE
 
 class Food:
-    def __init__(self, x, y):
+    def __init__(self, x, y, spawn_tick=0):
         self.x = x
         self.y = y
+        self.spawn_tick = spawn_tick  # Track when the food was spawned
 
     def consume(self):
         self.x, self.y = -1, -1
+        
+    def should_despawn(self, current_tick):
+        """Check if food should despawn based on age"""
+        return current_tick - self.spawn_tick > FOOD_DESPAWN_TIME
 
 class Obstacle:
     def __init__(self, x, y, width, height):
@@ -349,7 +440,30 @@ def generate_random_obstacles(num_obstacles, max_width, max_height):
     return obstacles
 
 
-def respawn_food(food_cells, obstacles):
+def is_position_accessible(x, y, obstacles):
+    """Check if a position is accessible to cells by ensuring there's a clear path from nearby positions."""
+    # Check if the position itself is blocked
+    if any(obstacle.is_collision(x, y) for obstacle in obstacles):
+        return False
+    
+    # Check if at least one adjacent position is accessible
+    adjacent_positions = [
+        (x - CELL_SIZE, y),
+        (x + CELL_SIZE, y),
+        (x, y - CELL_SIZE),
+        (x, y + CELL_SIZE)
+    ]
+    
+    for adj_x, adj_y in adjacent_positions:
+        if (0 <= adj_x < SCREEN_WIDTH - CELL_SIZE and 
+            0 <= adj_y < SCREEN_HEIGHT - CELL_SIZE and
+            not any(obstacle.is_collision(adj_x, adj_y) for obstacle in obstacles)):
+            return True
+    
+    return False
+
+
+def respawn_food(food_cells, obstacles, current_tick=0):
     if len(food_cells) < MIN_FOOD_CELLS:
         spawn_rate = 1.0
     else:
@@ -359,15 +473,18 @@ def respawn_food(food_cells, obstacles):
         mean_x = SCREEN_WIDTH / 2
         mean_y = SCREEN_HEIGHT / 2
         std_dev = min(SCREEN_WIDTH, SCREEN_HEIGHT) / 4
-        while True:
+        attempts = 0
+        max_attempts = 50  # Prevent infinite loops
+        while attempts < max_attempts:
             new_x = max(0, min(int(random.gauss(mean_x, std_dev)), SCREEN_WIDTH - CELL_SIZE))
             new_y = max(0, min(int(random.gauss(mean_y, std_dev)), SCREEN_HEIGHT - CELL_SIZE))
             new_x = (new_x // CELL_SIZE) * CELL_SIZE
             new_y = (new_y // CELL_SIZE) * CELL_SIZE
-            if not any(obstacle.is_collision(new_x, new_y) for obstacle in obstacles):
-                new_food = Food(new_x, new_y)
+            if is_position_accessible(new_x, new_y, obstacles):
+                new_food = Food(new_x, new_y, current_tick)
                 food_cells.append(new_food)
                 break
+            attempts += 1
 
 
 def draw_debug_view(screen, cell, center_x, center_y, font):
@@ -442,11 +559,15 @@ def reset_simulation(num_cells, num_food, obstacles):
         for _ in range(num_cells)
     ]
     food_cells = []
-    while len(food_cells) < num_food:
+    current_tick = 0
+    attempts = 0
+    max_attempts = 1000  # Prevent infinite loops
+    while len(food_cells) < num_food and attempts < max_attempts:
         x = random.randint(0, SCREEN_WIDTH // CELL_SIZE) * CELL_SIZE
         y = random.randint(0, SCREEN_HEIGHT // CELL_SIZE) * CELL_SIZE
-        if not any(obstacle.is_collision(x, y) for obstacle in obstacles):
-            food_cells.append(Food(x, y))
+        if is_position_accessible(x, y, obstacles):
+            food_cells.append(Food(x, y, current_tick))
+        attempts += 1
     return cells, food_cells
 
 def draw_stats_sidebar(screen, font, live_cells, food_cells, highest_generation, live_cells_history, food_cells_history, graph_surface_cells, graph_surface_food, max_ticks=0):
@@ -478,6 +599,12 @@ def draw_stats_sidebar(screen, font, live_cells, food_cells, highest_generation,
     draw_text(f"Food: {len(food_cells)}", text_y)
     text_y += spacing
     draw_text(f"Generation: {highest_generation}", text_y)
+    text_y += spacing
+    draw_text(f"Mating Attempts: {mating_attempts}", text_y)
+    text_y += spacing
+    draw_text(f"Mating Successes: {mating_successes}", text_y)
+    text_y += spacing
+    draw_text(f"Food Despawned: {food_despawned_count}", text_y)
     text_y += spacing
 
     # Draw Live Cells Graph
@@ -529,8 +656,7 @@ def calculate_energy_multiplier(cell):
 
     # Normalize the distance to create a multiplier
     max_distance = math.hypot(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-    multiplier = 1 + (distance / max_distance) * 2  # Scale multiplier (adjust factor as needed)
-
+    multiplier = 1 + (distance / max_distance) * 0.5  # Reduced from 2 - much less punishing
     return multiplier
 
 
@@ -580,6 +706,7 @@ def main():
         # Declare globals at the beginning of the function if they are modified
         global FOOD_RESPAWN_RATE
         global MIN_FOOD_CELLS
+        global food_despawned_count
 
         live_cells_count = len(cells)
         food_cells_count = len(food_cells)
@@ -608,6 +735,11 @@ def main():
                     spatial_grid = SpatialGrid(SCREEN_WIDTH, SCREEN_HEIGHT, GRID_CELL_SIZE)
                     for cell in cells:
                         spatial_grid.add(cell)
+                    # Reset counters
+                    global mating_attempts, mating_successes, food_despawned_count
+                    mating_attempts = 0
+                    mating_successes = 0
+                    food_despawned_count = 0
                     print("Reset grid and obstacles.")
                 elif event.key == pygame.K_p:
                     paused = not paused
@@ -650,12 +782,28 @@ def main():
             for cell in cells:
                 cell.move(food_cells, spatial_grid, obstacles)
                 cell.update_status()
+                
+                # Improved food eating logic - check for food at cell position
+                food_to_remove = None
                 for food in food_cells:
-                    if cell.x == food.x and cell.y == food.y:
-                        cell.eat(food, food_cells)
+                    # Check if cell is at the same grid position as food
+                    if (abs(cell.x - food.x) < CELL_SIZE and 
+                        abs(cell.y - food.y) < CELL_SIZE and 
+                        food.x != -1 and food.y != -1):
+                        food_to_remove = food
+                        break
+                
+                if food_to_remove:
+                    cell.eat(food_to_remove, food_cells)
+                
                 for other in spatial_grid.get_nearby(cell.x, cell.y):
                     if cell != other and cell.is_adjacent(other):
-                        if not cell.is_mating and not other.is_mating and cell.mating_cooldown == 0 and other.mating_cooldown == 0:
+                        # Only allow mating if both cells meet the relaxed conditions
+                        if (not cell.is_mating and not other.is_mating and 
+                            cell.mating_cooldown == 0 and other.mating_cooldown == 0 and
+                            cell.hunger >= 70 and other.hunger >= 70 and
+                            cell.hp >= 70 and other.hp >= 70 and
+                            cell.stamina >= 50 and other.stamina >= 50):
                             cell.start_mating(other)
                     if cell.is_mating and other.is_mating and cell.is_adjacent(other):
                         offspring = cell.mate(other, spatial_grid, obstacles)  # Pass obstacles here
@@ -692,11 +840,35 @@ def main():
                         #print(f"Debug view drawn for cell at ({cell.x}, {cell.y})") # Spams console
 
             cells.extend(new_cells)
-            respawn_food(food_cells, obstacles)
+            respawn_food(food_cells, obstacles, len(ticks)) # Pass current tick
+            
+            # Despawn old food
+            current_tick = len(ticks)
+            food_to_despawn = []
+            for food in food_cells:
+                if food.should_despawn(current_tick):
+                    food_to_despawn.append(food)
+            for food in food_to_despawn:
+                food_cells.remove(food)
+                food_despawned_count += 1
+            if len(food_to_despawn) > 0:
+                print(f"Despawned {len(food_to_despawn)} old food cells")
 
             for food in food_cells:
                 if food.x != -1 and food.y != -1:
-                    pygame.draw.rect(screen, GREEN, (food.x, food.y, CELL_SIZE, CELL_SIZE))
+                    # Calculate food age for visual feedback
+                    food_age = current_tick - food.spawn_tick
+                    age_ratio = min(food_age / FOOD_DESPAWN_TIME, 1.0)
+                    
+                    # Food gets more faded as it gets older
+                    if age_ratio > 0.8:  # Very old food - red tint
+                        food_color = (int(255 * (1 - age_ratio)), 255, int(255 * (1 - age_ratio)))
+                    elif age_ratio > 0.6:  # Old food - yellow tint
+                        food_color = (255, 255, int(255 * (1 - age_ratio * 0.5)))
+                    else:  # Fresh food - normal green
+                        food_color = GREEN
+                    
+                    pygame.draw.rect(screen, food_color, (food.x, food.y, CELL_SIZE, CELL_SIZE))
 
             pygame.display.flip()
             clock.tick(TICK_RATE)
